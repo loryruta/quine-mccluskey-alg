@@ -1,0 +1,6 @@
+[package]
+name = "quine-mcclusky-alg"
+version = "0.1.0"
+authors = ["Lorenzo Rutayisire <lorenzorutayisire@gmail.com>"]
+
+[dependencies]
