@@ -1,4 +1,3 @@
-#![feature(const_generics)]
 
 use std::mem::size_of;
 use std::vec::Vec;
@@ -34,6 +33,52 @@ impl Term {
     pub fn new(value: u32) -> Term {
         Term::new_with_mask(value, 0)
     }
+
+    fn to_string(&self, cardinality: usize, literal_mode: bool) -> String {
+        let mut result: String = String::new();
+        let mut literal: char = std::char::from_u32('A' as u32 + (cardinality - 1) as u32).unwrap();
+
+        let mut value = self.value;
+        let mut mask = self.mask;
+
+        for _ in 0..cardinality {
+            // literal mode (write the term using letters)
+            if literal_mode {
+                if mask & 1 == 0 {
+                    result.insert(0, literal);
+                    if value & 1 == 0 {
+                        result.insert(1, '\'');
+                    }
+                }
+            }
+
+            // non literal mode (write the term in binary)
+            if !literal_mode {
+                if mask & 1 == 0 {
+                    result.insert(0, if value & 1 == 0 { '0' } else { '1' });
+                } else {
+                    result.insert(0, '-');
+                }
+            }
+
+            mask >>= 1;
+            value >>= 1;
+
+            literal = std::char::from_u32(literal as u32 - 1).unwrap();
+        }
+
+        return result
+    }
+
+    fn terms_to_string<'a>(cardinality: usize, terms: impl Iterator<Item = &'a Term>, literal_mode: bool) -> String {
+        let mut result: String = terms.map(|term| -> String { term.to_string(cardinality, literal_mode) })
+            .collect::<Vec<String>>()
+            .join(",");
+
+        result = format!("({})", result);
+
+        return result
+    }
 }
 
 impl Clone for Term {
@@ -46,6 +91,7 @@ impl Clone for Term {
 }
 
 pub struct BinaryFunction {
+    /// Number of bits
     cardinality: usize,
 
     terms: HashSet<Term>,
@@ -77,32 +123,6 @@ impl BinaryFunction {
         &self.dont_care
     }
 
-    fn to_string(&self, term: &Term) -> String {
-        let mut symbol_char = 'A';
-        let mut symbols = vec![];
-
-        let mut i = (self.cardinality - 1) as u32;
-        loop {
-            let mut symbol = String::new();
-            if !get_bit(term.mask, i) {
-                symbol.push(symbol_char);
-                if !get_bit(term.value, i) {
-                    symbol += "'";
-                }
-            }
-            symbols.push(symbol);
-
-            symbol_char = std::char::from_u32((symbol_char as u32) + 1).unwrap();
-
-            if i == 0 { break; }
-            i -= 1;
-        }
-
-        symbols.join(",");
-
-        format!("value={:#032b} mask={:#032b}", term.value, term.mask)
-    }
-
     fn print_implicants(&self, implicants: &HashSet<Term>) {
         for implicant in implicants {
             print!("value={:#08b} mask={:#08b}\n", implicant.value, implicant.mask);
@@ -124,76 +144,63 @@ impl BinaryFunction {
     }
 }
 
+pub fn qmc_find_prime_imp(f: &BinaryFunction, to_simplify: &HashSet<Term>) -> (HashSet<Term>, usize) {
 
-pub fn find_prime_implicants(f: &BinaryFunction, implicants: &HashSet<Term>, step: u32) -> HashSet<Term> {
-    // Implicants are grouped by the number of 1s they contain and referenced by the following structure.
-    let group_count = f.cardinality + 1;
-    let mut grouped_implicants: Vec<Vec<&Term>> = vec![Vec::new(); group_count];
+    print!("[QMC] To simplify: {}\n", Term::terms_to_string(f.cardinality, to_simplify.iter(), false));
 
-    for implicant in implicants.iter() {
-        grouped_implicants[f.get_number_of_1(implicant.value, !implicant.mask)].push(implicant);
+    let groups_num = f.cardinality + 1;
+    let mut groups: Vec<Vec<(&Term, bool)>> = vec![Vec::new(); groups_num];
+    for imp in to_simplify.iter() {
+        let num_of_1 = f.get_number_of_1(imp.value, !imp.mask);
+        groups[num_of_1].push((imp, false));
     }
 
-    let mut resulting_implicants: HashSet<Term> = HashSet::new();
-    let mut has_ever_simplified = false;
-
-    let debug = false;
-
-    if debug {
-        print!("Input:\n");
-        f.print_implicants(implicants);
-
-        print!("Groups:\n");
-        for i in 0..grouped_implicants.len() {
-            print!("Group {}\n", i);
-            for implicant in &grouped_implicants[i] {
-                print!("{}\n", f.to_string(&implicant));
-            }
-        }
+    for num_of_1 in 0..groups_num {
+        print!("[QMC] Group {}: {}\n", num_of_1, Term::terms_to_string(
+            f.cardinality,
+            groups[num_of_1].iter().map(|(term, _)| (*term)),
+            false
+        ));
     }
 
-    for i in 0..grouped_implicants.len() {
-        // Compares the implicants of the current group `i` with the next one `j`.
-        let mut j = i + 1;
+    let mut result: HashSet<Term> = HashSet::new();
+    let mut simplified_num = 0;
 
-        // If `i` is pointing to the last group, as a second group, we check the previous.
-        // This is done not to forget the last implicants.
-        let last_group = j == grouped_implicants.len();
-        if last_group {
-            j = i - 1;
-        }
+    for i in 0..groups.len() {
+        let j = i + 1;
 
-        for implicant_a in &grouped_implicants[i] {
-            let mut simplified = false;
+        let (i_group, j_group) = groups.split_at_mut(j);
 
-            for implicant_b in &grouped_implicants[j] {
-                // The two implicants must share the same mask:
-                // 10-- | 00-- | -00-
-                // -001 | 01-- | -11-
-                // NO   | YES  | YES  ...
-                if implicant_a.mask != implicant_b.mask {
-                    continue;
-                }
+        for (imp_a, a_simplified) in i_group.last_mut().unwrap() {
+            if j < groups_num {
+                for (imp_b, b_simplified) in j_group.first_mut().unwrap() {
+                    // The two implicants must share the same mask:
+                    // 10-- | 00-- | -00-
+                    // -001 | 01-- | -11-
+                    // NO   | YES  | YES  ...
+                    if imp_a.mask != imp_b.mask {
+                        continue;
+                    }
 
-                // Gets the differing 1s from both implicants, if the number of differing 1s is 1,
-                // then we can create a new simplified term.
-                // 10  | 00
-                // 01  | 01
-                // 11  | 01
-                // NO  | YES ...
-                let mask = implicant_a.mask;
-                let diff = implicant_a.value ^ implicant_b.value;
-                if f.get_number_of_1(diff, !mask) == 1 {
-                    // The last group shouldn't push already added implicants because they've already been added.
-                    if !last_group {
-                        let term = Term::new_with_mask(
-                            implicant_a.value,
+                    // Gets the differing 1s from both implicants, if the number of differing 1s is 1,
+                    // then we can create a new simplified term.
+                    // 10  | 00
+                    // 01  | 01
+                    // 11  | 01
+                    // NO  | YES ...
+                    let mask = imp_a.mask; // = imp_b.mask
+                    let diff = imp_a.value ^ imp_b.value;
+                    if f.get_number_of_1(diff, !mask) == 1 {
+                        let simplified_imp = Term::new_with_mask(
+                            imp_a.value,
                             mask | diff
                         );
-                        resulting_implicants.insert(term);
 
+                        result.insert(simplified_imp);
+
+                        *a_simplified = true;
+                        *b_simplified = true;
                     }
-                    simplified = true;
                 }
             }
 
@@ -202,35 +209,30 @@ pub fn find_prime_implicants(f: &BinaryFunction, implicants: &HashSet<Term>, ste
             // 001 |     | 001 | 001
             // 111 |     |     | 111
             // 001 couldn't get simplified because varies two 1s compared to 111.
-            if !simplified {
-                resulting_implicants.insert((*implicant_a).clone());
+            if !*a_simplified {
+                result.insert((*imp_a).clone());
+            } else {
+                simplified_num += 1;
             }
-
-            has_ever_simplified |= simplified;
         }
     }
 
-    if debug {
-        print!("Result\n");
-        f.print_implicants(&resulting_implicants);
+    print!("[QMC] Simplified: {}\n", simplified_num);
+
+    if simplified_num > 0 {
+        result = qmc_find_prime_imp(f, &result).0;
     }
 
-    // Has the program ever simplified something? If so, we can repeat this step.
-    if has_ever_simplified {
-        resulting_implicants = find_prime_implicants(f, &resulting_implicants, step + 1);
-    }
-
-    return resulting_implicants;
+    return (result, simplified_num);
 }
 
-pub fn find_prime_implicants_from_function(f: &BinaryFunction) -> HashSet<Term> {
-    // Initially implicants are taken both from min_terms and dont_care,
-    // and they're clone inside one single vector.
-    let mut implicants: HashSet<Term> = HashSet::new();
-    implicants.extend(f.terms.iter().cloned());
-    implicants.extend(f.dont_care.iter().cloned());
+pub fn qmc_find_prime_imp_from_func(f: &BinaryFunction) -> HashSet<Term> {
+    // Initially implicants are taken both from min_terms and dont_care, and they're cloned inside one single vector.
+    let mut imp: HashSet<Term> = HashSet::new();
+    imp.extend(f.terms.iter().cloned());
+    imp.extend(f.dont_care.iter().cloned());
 
-    return find_prime_implicants(&f, &implicants, 0);
+    return qmc_find_prime_imp(&f, &imp).0;
 }
 
 fn main() {
@@ -244,13 +246,13 @@ fn main() {
     f.add_term(Term::new(12));
     f.add_term(Term::new(15));
 
-    f.add_term(Term::new(9));
-    f.add_term(Term::new(14));
+    f.add_dont_care(Term::new(9));
+    f.add_dont_care(Term::new(14));
 
-    let result = find_prime_implicants_from_function(&f);
+    let result = qmc_find_prime_imp_from_func(&f);
 
     print!("Result:\n");
     for implicant in result {
-        print!("{}\n", f.to_string(&implicant));
+        print!("{}\n", implicant.to_string(f.cardinality, true));
     }
 }
