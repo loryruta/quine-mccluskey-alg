@@ -351,11 +351,10 @@ pub fn qmc_find_essential_imp(f: &BinaryFunction, prime_imp: &HashSet<Term>) -> 
          */
 
         let found = qmc_essentiality_crit(&mut rows, &mut cols);
-        result.extend(found);
-
-        if rows.is_empty() && cols.is_empty() {
+        if found.is_empty() {
             break;
         }
+        result.extend(found);
     }
 
     result
@@ -373,15 +372,20 @@ pub fn qmc_simplify(f: &BinaryFunction) -> HashSet<Term> {
 
 fn main() {
     // Definition of the binary function:
-    let mut f = BinaryFunction::new(4);
+    let mut f = BinaryFunction::new(4); // The `cardinality` tells how many inputs do we have.
+
+    // Here define the inputs combination that will give f(input) = 1.
+    // Giving in f.add_term(5), will result in f(0101) = 1. Not defined inputs will result in f(not_def_input) = 0.
     f.add_term(Term::new(5));
     f.add_term(Term::new(6));
     f.add_term(Term::new(7));
     f.add_term(Term::new(8));
-    f.add_term(Term::new(9));
-    f.add_term(Term::new(10));
-    f.add_term(Term::new(11));
-    f.add_term(Term::new(12));
 
-    let result = qmc_simplify(&f);
+    // Here define the inputs combination that will give f(input) = x (or dont_care).
+    // Giving in f.add_term(10), will result in f(1010) = x.
+    f.add_dont_care(Term::new(10));
+    f.add_dont_care(Term::new(11));
+
+    // This is the function that will execute the algorithm and takes care of printing the results.
+    qmc_simplify(&f);
 }
