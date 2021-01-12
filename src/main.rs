@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::cmp::Ordering::{Less, Greater, Equal};
 use std::hash::Hash;
 use std::collections::HashSet;
+use std::borrow::BorrowMut;
 
 #[inline]
 pub fn get_bit(mut value: u32, pos: u32) -> bool {
@@ -21,7 +22,7 @@ pub struct Term {
     ///
     /// data: 1011
     /// mask: 0001
-    /// This combination refers to the min_term AB'C.
+    /// This combination refers to the min_term 101- or AB'C.
     mask: u32,
 }
 
@@ -32,6 +33,11 @@ impl Term {
 
     pub fn new(value: u32) -> Term {
         Term::new_with_mask(value, 0)
+    }
+
+    pub fn covers(&self, term: &Term) -> bool {
+        let common_mask = self.mask | term.mask;
+        self.value & !common_mask == term.value & !common_mask
     }
 
     fn to_string(&self, cardinality: usize, literal_mode: bool) -> String {
@@ -235,24 +241,147 @@ pub fn qmc_find_prime_imp_from_func(f: &BinaryFunction) -> HashSet<Term> {
     return qmc_find_prime_imp(&f, &imp).0;
 }
 
-fn main() {
-    // Definition of the min terms and dont care.
+pub fn qmc_dominance_crit(rows: &mut HashSet<Term>, cols: &HashSet<Term>, covers: impl Fn(&Term, &Term) -> bool) -> usize {
+    let mut to_del_rows: HashSet<Term> = HashSet::new();
 
+    for row_1 in rows.iter() {
+        for row_2 in rows.iter() {
+            let was_del = to_del_rows.contains(row_1) || to_del_rows.contains(row_2); // One of the rows was simplified before!
+            if !was_del && row_1 != row_2 {
+                // row_1 is the one considered dominant.
+                // row_2 is the one to check against.
+
+                let mut is_dominant = true;
+                for col in cols.iter() {
+                    if !covers(row_1, col) && covers(row_2, col) {
+                        is_dominant = false; // The row can't be dominant in this case.
+                        break;
+                    }
+                }
+
+                if is_dominant {
+                    to_del_rows.insert(row_2.clone());
+                }
+            }
+        }
+    }
+
+    for to_del_row in to_del_rows.iter() {
+        rows.remove(to_del_row);
+    }
+
+    to_del_rows.len()
+}
+
+pub fn qmc_essentiality_crit(rows: &mut HashSet<Term>, cols: &mut HashSet<Term>) -> HashSet<Term> {
+    let mut to_del_rows: HashSet<Term> = HashSet::new();
+    let mut to_del_cols: HashSet<Term> = HashSet::new();
+
+    let mut result = HashSet::new();
+
+    for col in cols.iter() {
+        if to_del_cols.contains(col) {
+            continue;
+        }
+
+        for row_1 in rows.iter() {
+            if to_del_rows.contains(row_1) {
+                continue;
+            }
+
+            // Check if the current column is covered only by the row_1.
+            let mut is_covered_only_by_me = row_1.covers(col);
+
+            if is_covered_only_by_me {
+                for row_2 in rows.iter() {
+                    if to_del_rows.contains(row_2) {
+                        continue;
+                    }
+
+                    if row_1 != row_2 && row_2.covers(col) {
+                        is_covered_only_by_me = false;
+                        break;
+                    }
+                }
+            }
+
+            // Remove the row and all the cols it covers from the given `rows` and `cols`.
+            if is_covered_only_by_me {
+                result.insert(row_1.clone());
+
+                to_del_rows.insert(row_1.clone());
+                for col in cols.iter() {
+                    if row_1.covers(col) {
+                        to_del_cols.insert(col.clone()); // Try to insert it even if it could be already there.
+                    }
+                }
+            }
+        }
+    }
+
+    for to_del_row in to_del_rows {
+        rows.remove(&to_del_row);
+    }
+
+    for to_del_col in to_del_cols {
+        cols.remove(&to_del_col);
+    }
+
+    result
+}
+
+pub fn qmc_find_essential_imp(f: &BinaryFunction, prime_imp: &HashSet<Term>) -> HashSet<Term> {
+    let mut rows = prime_imp.clone();
+    let mut cols = f.terms.clone();
+
+    let mut result = HashSet::new();
+
+    loop {
+        // Using just the essentiality crit is enough to get the essential implicants.
+        // The row/col dominant crit could be used but _just one_ of them, not both in the same process.
+        /*
+        loop {
+            let mut simplified = false;
+            simplified |= qmc_dominance_crit(&mut rows, &cols, |row, col| row.covers(col)) > 0; // Just use row dominance crit.
+            //simplified |= qmc_dominance_crit(&mut cols, &rows, |col, row| row.covers(col)) > 0;
+            if !simplified {
+                break;
+            }
+        }
+         */
+
+        let found = qmc_essentiality_crit(&mut rows, &mut cols);
+        result.extend(found);
+
+        if rows.is_empty() && cols.is_empty() {
+            break;
+        }
+    }
+
+    result
+}
+
+pub fn qmc_simplify(f: &BinaryFunction) -> HashSet<Term> {
+    let prime_imp = qmc_find_prime_imp_from_func(f);
+    print!("[QMC] Prime implicants: {}\n", Term::terms_to_string(f.cardinality, prime_imp.iter(), false));
+
+    let essential_imp = qmc_find_essential_imp(f, &prime_imp);
+    print!("[QMC] Essential implicants: {}\n", Term::terms_to_string(f.cardinality, essential_imp.iter(), false));
+
+    return essential_imp;
+}
+
+fn main() {
+    // Definition of the binary function:
     let mut f = BinaryFunction::new(4);
-    f.add_term(Term::new(4));
+    f.add_term(Term::new(5));
+    f.add_term(Term::new(6));
+    f.add_term(Term::new(7));
     f.add_term(Term::new(8));
+    f.add_term(Term::new(9));
     f.add_term(Term::new(10));
     f.add_term(Term::new(11));
     f.add_term(Term::new(12));
-    f.add_term(Term::new(15));
 
-    f.add_dont_care(Term::new(9));
-    f.add_dont_care(Term::new(14));
-
-    let result = qmc_find_prime_imp_from_func(&f);
-
-    print!("Result:\n");
-    for implicant in result {
-        print!("{}\n", implicant.to_string(f.cardinality, true));
-    }
+    let result = qmc_simplify(&f);
 }
